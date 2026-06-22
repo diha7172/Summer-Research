@@ -11,5 +11,3 @@ webapp/data/
 # generated single-file app (regenerate with: py build_standalone.py)
 Demographics_Explorer.html
 
-# personal research docs (delivered, not committed)
-*.docx
