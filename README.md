@@ -17,14 +17,17 @@ Zero install beyond Python. You need a free Census API key
 `census_key.txt`.
 
 ```powershell
-py census_bulk.py     # pull every geography (~35k) into webapp/data/  (~90s, one time)
+py census_bulk.py     # pull every geography (~35k) for 2013/2018/2024 into webapp/data/  (~3-4 min, one time)
 py serve.py           # opens http://localhost:8000 in your browser
 ```
 
 Then just search — `Boulder city, Colorado`, `Cook County`, `Texas`,
-`United States`. Use the arrow keys + Enter. Re-run `py census_bulk.py` to
-refresh to a newer ACS year. The generated `webapp/data/` is gitignored (it's
-large and regenerates from the API).
+`United States`. Use the arrow keys + Enter. Switch the **Year** (2013 / 2018 /
+2024) to see a decade of change, and **+ Compare another place** to view two
+geographies side by side. By default `census_bulk.py` pulls those three years;
+change them with `--years` (e.g. `py census_bulk.py --years 2019-2024` or
+`--years 2024`). The generated `webapp/data/` is gitignored (it's large and
+regenerates from the API).
 
 ### Single-file version to share (no setup for the recipient)
 
@@ -33,7 +36,7 @@ no API key, works offline:
 
 ```powershell
 py census_bulk.py          # if you haven't already
-py build_standalone.py     # -> Demographics_Explorer.html  (~4.5 MB, all 35k geographies embedded)
+py build_standalone.py     # -> Demographics_Explorer.html  (~12 MB, all 35k geographies x 3 years embedded)
 ```
 
 `Demographics_Explorer.html` is one self-contained file (data is gzip+base64

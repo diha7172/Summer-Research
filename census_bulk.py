@@ -8,16 +8,19 @@ sharded JSON for the webapp/ search UI.
 
 Reuses the verified tables/variables/builders from census_scraper.py.
 
+Profiles are year-keyed so the web app can offer a year selector / trends.
+
 Run (needs a Census key in CENSUS_API_KEY env var or census_key.txt):
-    py census_bulk.py                 # latest available ACS5 year, everything
-    py census_bulk.py --year 2022
+    py census_bulk.py                 # default years 2013,2018,2024 - everything
+    py census_bulk.py --years 2024
+    py census_bulk.py --years 2019-2024
     py census_bulk.py --no-places     # skip the ~30k places (states+counties only)
 
 Output:
     webapp/data/index.json            # [{id,name,level,state}] for search
-    webapp/data/profiles/us.json      # nation + all states
+    webapp/data/profiles/us.json      # nation + all states  -> {geoId:{year:profile}}
     webapp/data/profiles/<ss>.json    # counties + places of state <ss>
-    webapp/data/meta.json             # {year, counts, generated}
+    webapp/data/meta.json             # {year, years, counts, generated}
 """
 
 import os
