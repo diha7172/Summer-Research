@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+datausa_output/
+# scraper output directories (datausa_output and any custom OUT_DIR used in tests)
+*_output/
+*.log
