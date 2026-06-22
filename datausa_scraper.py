@@ -1,116 +1,108 @@
 """
-DataUSA Data Fetcher  (combined build, v3 - resilient against origin outages)
-=============================================================================
-Pulls household income (by bracket), health-insurance coverage, and
-race/ethnicity from the DataUSA Tesseract API for any U.S. geography, at
-Nation, State, County, or Place (city) level.
+DataUSA Data Fetcher  (v4 - resilient + derived profiles + geographic fallback)
+===============================================================================
+Pulls household income, health-insurance coverage, and race/ethnicity from the
+DataUSA Tesseract API for any U.S. geography (Nation, State, County, Place) and
+turns them into the analysis-ready "profile" the synthetic-population pipeline
+needs:
 
-WHAT WAS ACTUALLY CAUSING THE STATE-LEVEL "500s" (root cause, verified)
------------------------------------------------------------------------
-The state-level failures were NOT caused by the query being too large, and
-NOT by anything state-specific in the cube or parameters. They were caused by
-the DataUSA Tesseract ORIGIN server being intermittently unreachable behind
-Cloudflare.
+  * population  - total population (derived from the race cube; see note below)
+  * diversity   - race breakdown with Hispanic LUMPED into one group:
+                  "Hispanic (Any Race)" + each race as "(Non-Hispanic)", % of pop
+  * insurance   - the coverage members grouped into Private / Public / Uninsured,
+                  plus each member, as % of the covered universe
+  * income      - every household-income bracket (all bins kept) as % of households
 
-Evidence gathered by hitting the live API (see the diagnosis note in the PR /
-chat for full numbers):
-  * The lightest possible state query (one state, latest year, NO bucket
-    drilldown -> 16 rows) failed exactly as often as the heaviest one
-    (all years + bucket). 0/15 vs 0/15. Row count is irrelevant, so the
-    "the big query overloads the backend" hypothesis is false.
-  * The income cube failed at EVERY level - Nation, State, County, and Place -
-    not just State. So it is not state-specific.
-  * The errors were Cloudflare edge errors against the origin, not application
-    errors from the query: HTTP 525 (SSL handshake to origin failed), 502
-    (bad gateway), 500 (origin 500), and read timeouts - cycling, never the
-    same code "every time".
-  * Meanwhile the exact "known-working" County race URL returned 200 on every
-    single attempt for several minutes... and then, the instant its Cloudflare
-    cache entry expired, it ALSO started returning 525. That is the tell: it
-    was being served from Cloudflare's edge cache the whole time, never
-    touching the sick origin.
+GEOGRAPHIC FALLBACK (new in v4)
+-------------------------------
+"Fill in State or National data when data is missing for an area." For each
+measure group we walk a fallback chain and use the first geography that has
+data:
 
-So the user's real-world pattern ("State 500s, County/Place work") was
-Cloudflare cache behavior: County/Place URLs that had already been pulled were
-cache HITs (200, served from the edge); fresh State URLs were cache MISSes that
-had to reach the unhealthy origin and came back 5xx. Nothing about the State
-query itself is wrong.
+      Place  ->  its State  ->  Nation
+      County ->  its State  ->  Nation
+      State  ->  Nation
+      Nation ->  (no fallback)
 
-HOW THIS VERSION FIXES IT
--------------------------
-You cannot "fix" someone else's flaky origin, but you can stop it from
-corrupting your data and stop it from masquerading as "no data":
+Every profile row carries source_geo_id / source_geo_level / is_fallback, so a
+value filled from the state or the nation is clearly labelled and never silently
+passed off as the area's own measurement. Percentages (distributions) are what
+fall back - using the state's income distribution as a proxy for a county that
+the API can't return is exactly what a synthetic population needs, as long as it
+is labelled, which it is.
 
-  1. RETRY every transient transport failure, not just classic 500s:
-     all 5xx INCLUDING Cloudflare's 520-527 family, plus 408/429, timeouts and
-     connection/SSL errors. Patient, capped exponential backoff with jitter.
+This fallback also makes the scraper robust to the DataUSA origin's intermittent
+outages (see DIAGNOSIS.md): if a county/place URL is a cache miss against a sick
+origin, the run still produces a usable, clearly-labelled profile from the
+state/national distribution instead of an empty row.
 
-  2. TRI-STATE result for every request, so we never confuse the three
-     fundamentally different outcomes:
-        - "ok"           : HTTP 200 with rows  -> real data
-        - "empty"        : HTTP 200 with 0 rows -> genuinely no data here
-        - "server_error" : exhausted retries on 5xx/timeout -> origin problem
-        - "client_error" : 4xx (e.g. bad cube name) -> our request is wrong
-     A server_error is NEVER recorded as "not available" or as an empty CSV.
-     This is the specific bug that made fixable 500s look like missing data:
-     the old availability probe turned any failed request into
-     "NOT available" and skipped the cube entirely.
+WHY POPULATION IS DERIVED FROM THE RACE CUBE
+--------------------------------------------
+The dedicated population cube `acs_yg_total_population_5` exists in the schema
+but returns 200-with-zero-rows for the geographies tested here (a real, cached
+empty - the "probes available but returns nothing" trap). The race cube
+(B03002) sums to the full population by definition, so we derive population from
+it. Verified: US 2024 race-sum = 334,922,508 (correct), Hispanic = 19.3%.
 
-  3. The availability probe no longer gates on server errors. It only skips a
-     cube when the API positively answers 200-with-zero-rows (true no-data) or
-     a 4xx. A server_error during the probe means "attempt the real pull
-     anyway".
+ROOT CAUSE OF THE OLD STATE-LEVEL "500s" (unchanged from v3, see DIAGNOSIS.md)
+-----------------------------------------------------------------------------
+Not query size and not state-specific: the DataUSA origin is intermittently
+unreachable behind Cloudflare (525/502/500/timeouts). County/Place "worked"
+only because those URLs were warm in Cloudflare's edge cache; fresh State URLs
+were cache misses that hit the sick origin. The lightest state query (16 rows)
+failed exactly as often as the heaviest, and the income cube failed at every
+level including County. The actionable bug was the old availability probe
+treating any failed request as "NOT available" and skipping the cube, turning
+fixable 5xx into silent no-data. Fixed via tri-state classification below.
 
-  4. Year-by-year fallback is used as a RECOVERY path for server_errors
-     (smaller per-year requests get their own retry budget and are far more
-     likely to be individually cacheable / to slip through during a brief
-     origin up-window), not as a response to genuine emptiness.
+Cube names / measures / dimensions (verified live against /tesseract/cubes):
+  income    : acs_yg_household_income_5      "Household Income"  + Household Income Bucket
+  insurance : acs_health_coverage_s_5        "Number Covered"    + Health Coverage, Age Group
+  race      : acs_ygr_race_with_hispanic_5   "Hispanic Population" + Race, Ethnicity
 
-  5. Built for unattended batch runs:
-        - one geography or one cube failing never crashes the run,
-        - every per-cube CSV is written the moment it is fetched (crash-safe),
-        - the MASTER long file is appended after each geography,
-        - --resume reloads already-saved per-cube CSVs instead of re-fetching,
-        - a failures log (_failures.csv) and a run log record exactly which
-          geo / cube / year failed and why (server_error vs no-data).
-
-Cube names / measures / dimensions are unchanged from v2 (verified live):
-  income    : acs_yg_household_income_5      measure "Household Income"
-              extra drilldown "Household Income Bucket"   (B19001 brackets)
-  insurance : acs_health_coverage_s_5        measure "Number Covered"
-              extra drilldowns "Health Coverage","Age Group"
-  race      : acs_ygr_race_with_hispanic_5   measure "Hispanic Population"
-              extra drilldowns "Race","Ethnicity"        (B03002 counts)
-
-Year filtering uses include=Year:<yr> (the time= param only accepts
-.latest/.oldest/.trailing, never a literal year).
+Year filtering uses include=Year:<yr> (time= only accepts .latest/.oldest/.trailing).
 
 Usage (Windows PowerShell: use `python` or `py`):
     pip install requests
-    python datausa_scraper.py --geo 04000US08 --name "Colorado"
+    python datausa_scraper.py --geo 16000US0807850 --name "Boulder city, CO"
     python datausa_scraper.py --examples
-    python datausa_scraper.py --geo 05000US08013 --name "Boulder County, CO" --by-year
+    python datausa_scraper.py --all-states
     python datausa_scraper.py --geos-file geos.txt --resume
-    python datausa_scraper.py --geo 04000US08,04000US54 --name "CO+WV"
+    python datausa_scraper.py --geo 05000US08013 --name "Boulder County, CO" --by-year
+
+Outputs (in datausa_output/):
+    <geo>__profile.csv         tidy population/diversity/insurance/income, % + source
+    MASTER_profiles.csv        all geographies' profiles stitched together
+    <geo>__<group>.csv         raw API rows for the geo (only when it has its own data)
+    <geo>__sources.csv         where each measure group's data came from (honest report)
+    _failures.csv, run.log     what failed and why (server_error vs no_data)
 """
 
 import os
+import sys
 import csv
 import time
 import random
 import argparse
 import logging
 import requests
+from collections import defaultdict
 
 
 BASE_URL = "https://api.datausa.io/tesseract/data.jsonrecords"
 OUT_DIR = "datausa_output"
 
-# Long-format schema. Fixed order so the combined + MASTER files have a stable
-# schema across every geography and every (resumed) run.
+# Raw long-format schema (per-geo self data; kept for backward compatibility).
 LONG_FIELDS = [
     "geo_id", "geo_name", "geo_level", "year",
     "measure_group", "category", "measure", "value",
+]
+
+# Derived profile schema - THE deliverable for the synthetic-population pipeline.
+PROFILE_FIELDS = [
+    "geo_id", "geo_name", "geo_level", "year",
+    "measure_group", "category", "count", "percent",
+    "source_geo_id", "source_geo_name", "source_geo_level", "is_fallback",
 ]
 
 SESSION = requests.Session()
@@ -128,6 +120,79 @@ SESSION.headers.update({
 log = logging.getLogger("datausa")
 
 
+# --- friendly console progress (no external deps) --------------------------
+
+class UI:
+    """Single-line live progress bar on a real terminal; concise milestone
+    lines when output is piped/redirected. All the noisy retry detail goes to
+    the run.log file instead of the console (see setup_logging)."""
+
+    BAR = 22
+
+    def __init__(self, total_units, enabled=True):
+        self.total = max(1, total_units)
+        self.done_units = 0
+        self.geo = ""
+        self.step = ""
+        self.note_txt = ""
+        self.tty = enabled and sys.stderr.isatty()
+        self.width = 110
+
+    def start_geo(self, idx, total_geos, name):
+        self.geo = f"{idx}/{total_geos} {name}"
+        self.step = ""
+        self.note_txt = ""
+        if not self.tty:
+            print(f"\n[{idx}/{total_geos}] {name} ...", flush=True)
+        self._draw()
+
+    def set_step(self, label):
+        self.step = label
+        self.note_txt = ""
+        self._draw()
+
+    def note(self, txt):
+        self.note_txt = txt
+        self._draw()
+
+    def advance(self):
+        self.done_units += 1
+        self.note_txt = ""
+        self._draw()
+
+    def milestone(self, txt):
+        if self.tty:
+            sys.stderr.write("\r" + " " * self.width + "\r")
+            sys.stderr.write("   " + txt + "\n")
+            self._draw()
+        else:
+            print("   " + txt, flush=True)
+
+    def _draw(self):
+        if not self.tty:
+            return
+        frac = min(1.0, self.done_units / self.total)
+        fill = int(self.BAR * frac)
+        bar = "[" + "#" * fill + "-" * (self.BAR - fill) + "]"
+        msg = f"\r{bar} {int(frac*100):3d}% | {self.geo}"
+        if self.step:
+            msg += f" | {self.step}"
+        if self.note_txt:
+            msg += f" ({self.note_txt})"
+        sys.stderr.write(msg[:self.width].ljust(self.width))
+        sys.stderr.flush()
+
+    def close(self):
+        if self.tty:
+            sys.stderr.write("\r" + " " * self.width + "\r")
+            sys.stderr.flush()
+
+
+# Active UI for the current run; request_with_retry pokes it so the bar stays
+# alive during backoff sleeps instead of looking frozen.
+_UI = None
+
+
 GEO_LEVEL_MAP = {
     "16000US": "Place",
     "05000US": "County",
@@ -140,13 +205,10 @@ def detect_geo_level(geo_id: str) -> str:
     for prefix, level in GEO_LEVEL_MAP.items():
         if geo_id.startswith(prefix):
             return level
-    # Bare "01000US" is the whole nation; fall back to Place for unknowns.
-    if geo_id.startswith("01000US"):
-        return "Nation"
     return "Place"
 
 
-# Each measure group. extra_dd are drilldowns beyond geo+year (e.g. Race).
+# The three real data cubes. Population is derived from "race" (see header).
 CUBES = {
     "income": {
         "cube": "acs_yg_household_income_5",
@@ -168,18 +230,30 @@ CUBES = {
     },
 }
 
+# Coverage member -> Private / Public / Uninsured. Military Health Insurance is
+# the 7th member (not in the user's "6"); folded into Public so the percentages
+# still sum to 100 and no one is dropped.
+COVERAGE_GROUP = {
+    "Employer": "Private",
+    "Direct Purchase": "Private",
+    "Medicare": "Public",
+    "Medicaid": "Public",
+    "Veterans Affairs": "Public",
+    "Military Health Insurance": "Public",
+    "Uninsured": "Uninsured",
+}
+COVERAGE_ORDER = ["Employer", "Direct Purchase", "Medicare", "Medicaid",
+                  "Veterans Affairs", "Military Health Insurance", "Uninsured"]
+GROUP_ORDER = ["Private", "Public", "Uninsured"]
+
+HISPANIC = "Hispanic or Latino"
+NOT_HISPANIC = "Not Hispanic or Latino"
+
 
 # --- tri-state fetch result ------------------------------------------------
 
 class FetchResult:
-    """One of four outcomes for an API call, so callers never confuse
-    'no data' with 'the server failed'.
-
-      status == "ok"           -> HTTP 200, rows present
-      status == "empty"        -> HTTP 200, zero rows (genuinely no data)
-      status == "server_error" -> retries exhausted on 5xx / timeout / conn
-      status == "client_error" -> 4xx that is not retryable (e.g. bad cube)
-    """
+    """ok (200+rows) / empty (200+0 rows) / server_error / client_error."""
 
     def __init__(self, status, rows=None, http=None, detail=""):
         self.status = status
@@ -188,7 +262,7 @@ class FetchResult:
         self.detail = detail
 
     @property
-    def ok(self):           # request succeeded at the HTTP layer
+    def ok(self):
         return self.status in ("ok", "empty")
 
     @property
@@ -200,8 +274,6 @@ class FetchResult:
         return self.status == "server_error"
 
 
-# Cloudflare-specific 5xx codes (origin unreachable / TLS / timeout) on top of
-# the normal 500-504. All are transient transport problems -> retry.
 RETRYABLE_HTTP = {408, 425, 429, 500, 502, 503, 504,
                   520, 521, 522, 523, 524, 525, 526, 527, 530}
 
@@ -209,13 +281,8 @@ RETRYABLE_HTTP = {408, 425, 429, 500, 502, 503, 504,
 def request_with_retry(params: dict, max_retries: int = 7,
                        base_wait: float = 2.0, cap: float = 45.0,
                        timeout: int = 45) -> FetchResult:
-    """GET with patient, jittered exponential backoff.
-
-    Retries every transient transport failure: all 5xx (including Cloudflare's
-    520-527 family that show up when their edge cannot reach the DataUSA
-    origin), 408/425/429, read timeouts, and connection/SSL errors. Returns a
-    FetchResult so the caller can tell 'no data' from 'server failed'.
-    """
+    """GET with patient, jittered backoff. Retries all transient transport
+    failures (5xx incl. Cloudflare 520-527, 408/425/429, timeouts, conn/SSL)."""
     last_detail = ""
     last_http = None
     for attempt in range(max_retries):
@@ -226,7 +293,6 @@ def request_with_retry(params: dict, max_retries: int = 7,
                 try:
                     rows = r.json().get("data", [])
                 except ValueError as e:
-                    # 200 but unparseable body -> treat as transient
                     last_detail = f"bad JSON: {e}"
                     log.warning("      200 but invalid JSON, retrying: %s", e)
                 else:
@@ -235,27 +301,30 @@ def request_with_retry(params: dict, max_retries: int = 7,
             elif r.status_code in RETRYABLE_HTTP:
                 wait = _backoff(base_wait, attempt, cap)
                 last_detail = _short_err(r)
-                log.warning("      server %s (%s), retry in %.0fs "
-                            "(attempt %d/%d)", r.status_code, last_detail,
-                            wait, attempt + 1, max_retries)
+                log.debug("      server %s (%s), retry in %.0fs "
+                          "(attempt %d/%d)", r.status_code, last_detail,
+                          wait, attempt + 1, max_retries)
+                if _UI:
+                    _UI.note(f"server {r.status_code}, retry {attempt+1}/{max_retries}")
                 time.sleep(wait)
                 continue
             else:
-                # 4xx other than 408/425/429 -> our request is wrong, no retry
                 detail = _short_err(r)
-                log.info("      client error %s: %s", r.status_code, detail)
+                log.debug("      client error %s: %s", r.status_code, detail)
                 return FetchResult("client_error", http=r.status_code,
                                    detail=detail)
         except (requests.Timeout, requests.ConnectionError) as e:
             wait = _backoff(base_wait, attempt, cap)
             last_detail = type(e).__name__
-            log.warning("      %s, retry in %.0fs (attempt %d/%d)",
-                        last_detail, wait, attempt + 1, max_retries)
+            log.debug("      %s, retry in %.0fs (attempt %d/%d)",
+                      last_detail, wait, attempt + 1, max_retries)
+            if _UI:
+                _UI.note(f"{last_detail}, retry {attempt+1}/{max_retries}")
             time.sleep(wait)
         except requests.RequestException as e:
-            log.error("      request error: %s", e)
+            log.debug("      request error: %s", e)
             return FetchResult("server_error", http=last_http, detail=str(e))
-    log.error("      gave up after %d attempts (last: %s)",
+    log.debug("      gave up after %d attempts (last: %s)",
               max_retries, last_detail or last_http)
     return FetchResult("server_error", http=last_http,
                        detail=last_detail or "retries exhausted")
@@ -266,7 +335,6 @@ def _backoff(base, attempt, cap):
 
 
 def _short_err(resp) -> str:
-    """Pull a compact reason out of a non-200 body (Cloudflare JSON or HTML)."""
     try:
         j = resp.json()
         return str(j.get("error_name") or j.get("title") or j.get("detail")
@@ -277,7 +345,7 @@ def _short_err(resp) -> str:
 
 # --- query builders --------------------------------------------------------
 
-def build_include(geo_level: str, geo_id: str, year=None) -> str:
+def build_include(geo_level, geo_id, year=None):
     inc = f"{geo_level}:{geo_id}"
     if year is not None:
         inc += f";Year:{year}"
@@ -297,38 +365,7 @@ def _params(geo_level, geo_id, spec, year=None, with_extra=True, latest=False):
     return p
 
 
-# --- availability probe (does NOT gate on server errors) -------------------
-
-def check_availability(geo_id: str, geo_level: str) -> dict:
-    """Probe each cube for the latest year.
-
-    Returns {key: status} where status is "available" (200+rows),
-    "no_data" (200+0 rows), or "server_error" (could not reach origin).
-    Crucially, "server_error" does NOT mean the cube is unavailable - the
-    caller still attempts the real pull. Only "no_data" / client errors cause
-    a skip.
-    """
-    log.info("  Availability check:")
-    status = {}
-    for key, spec in CUBES.items():
-        res = request_with_retry(_params(geo_level, geo_id, spec, latest=True),
-                                 max_retries=5)
-        if res.has_data:
-            status[key] = "available"
-        elif res.status == "empty":
-            status[key] = "no_data"
-        elif res.status == "client_error":
-            status[key] = "no_data"   # e.g. cube/geo combination invalid
-        else:
-            status[key] = "server_error"
-        label = {"available": "available",
-                 "no_data": "NOT available (no data)",
-                 "server_error": "server error (will still try)"}[status[key]]
-        log.info("    %-28s %s", spec["label"], label)
-    return status
-
-
-# --- fetching --------------------------------------------------------------
+# --- fetching (with year-by-year recovery) ---------------------------------
 
 def fetch_cube_all_years(geo_id, geo_level, spec) -> FetchResult:
     res = request_with_retry(_params(geo_level, geo_id, spec))
@@ -346,21 +383,13 @@ def discover_years(geo_id, geo_level, spec) -> list:
         years = sorted({int(r["Year"]) for r in res.rows if r.get("Year")})
         if years:
             return years
-    # Generous ACS 5-year default span when discovery itself can't reach origin
     return list(range(2013, 2024))
 
 
 def fetch_cube_by_year(geo_id, geo_level, spec, failures, group):
-    """One request per year. Returns (rows, all_year_server_error).
-
-    all_year_server_error is True only if EVERY year ended in a server_error
-    and zero rows were recovered - i.e. we truly couldn't reach the origin for
-    this cube, as opposed to the cube simply having no data.
-    """
+    """One request per year. Returns (rows, all_year_server_error)."""
     years = discover_years(geo_id, geo_level, spec)
-    all_rows = []
-    any_ok = False
-    any_server_error = False
+    all_rows, any_ok, any_err = [], False, False
     for yr in years:
         res = request_with_retry(_params(geo_level, geo_id, spec, year=yr))
         if res.ok:
@@ -368,190 +397,184 @@ def fetch_cube_by_year(geo_id, geo_level, spec, failures, group):
             if res.rows:
                 all_rows.extend(res.rows)
                 log.info("      %s: %d row(s)", yr, len(res.rows))
-            else:
-                log.info("      %s: no data", yr)
         else:
-            any_server_error = True
-            log.warning("      %s: %s (%s)", yr, res.status, res.detail)
+            any_err = True
             failures.append({"geo_id": geo_id, "measure_group": group,
                              "year": yr, "status": res.status,
                              "http": res.http, "detail": res.detail})
         time.sleep(0.3)
-    all_year_server_error = (not any_ok) and any_server_error and not all_rows
-    return all_rows, all_year_server_error
+    return all_rows, ((not any_ok) and any_err and not all_rows)
 
 
-# --- IO --------------------------------------------------------------------
+# --- raw fetch with fallback + cache ---------------------------------------
 
-def save_rows(rows, path, fieldnames=None) -> None:
-    if not rows:
-        return
-    if fieldnames is None:
-        fieldnames = sorted({k for row in rows for k in row.keys()})
-    with open(path, "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
-        w.writeheader()
-        w.writerows(rows)
+# (geo_id, group) -> rows. Lets state/nation be fetched once and reused across
+# every place/county in a batch.
+_RAW_CACHE = {}
 
 
-def load_rows(path) -> list:
-    if not os.path.exists(path):
-        return []
-    with open(path, "r", newline="", encoding="utf-8") as f:
-        return list(csv.DictReader(f))
+def state_geo_of(geo_id):
+    """Derive the containing State geo id from a Place/County id, else None."""
+    level = detect_geo_level(geo_id)
+    if level in ("Place", "County") and "US" in geo_id:
+        fips = geo_id.split("US", 1)[1][:2]
+        if len(fips) == 2 and fips.isdigit():
+            return "04000US" + fips
+    return None
 
 
-def append_master(rows, path) -> None:
-    if not rows:
-        return
-    new = not os.path.exists(path)
-    with open(path, "a", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=LONG_FIELDS, extrasaction="ignore")
-        if new:
-            w.writeheader()
-        w.writerows(rows)
+def fallback_chain(geo_id):
+    """[self, (state), nation] honoring the requested level."""
+    chain = [geo_id]
+    sg = state_geo_of(geo_id)
+    if sg and sg not in chain:
+        chain.append(sg)
+    if geo_id != "01000US" and "01000US" not in chain:
+        chain.append("01000US")
+    return chain
 
 
-def to_long_records(rows, geo_id, geo_name, geo_level, group, spec) -> list:
-    out = []
-    cat_fields = spec["extra_dd"]
+def cached_fetch(geo_id, group, spec, failures, by_year=False):
+    """Fetch one cube for one geo with the resilient path; cached per run."""
+    key = (geo_id, group)
+    if key in _RAW_CACHE:
+        return _RAW_CACHE[key]
+    level = detect_geo_level(geo_id)
+    if by_year:
+        rows, _ = fetch_cube_by_year(geo_id, level, spec, failures, group)
+    else:
+        res = fetch_cube_all_years(geo_id, level, spec)
+        if res.has_data:
+            rows = res.rows
+        elif res.is_server_error or res.status == "client_error":
+            # Fast-outage gate: one quick latest-year probe. If the origin
+            # can't even answer that, it's down for this geo -> skip the
+            # expensive year-by-year grind and let the fallback chain take
+            # over immediately (keeps batch runs snappy during an outage).
+            if _UI:
+                _UI.note("checking if origin is reachable")
+            probe = request_with_retry(
+                _params(level, geo_id, spec, latest=True), max_retries=2)
+            if probe.has_data or probe.status == "empty":
+                log.info("      %s %s: origin reachable, year-by-year recovery",
+                         geo_id, group)
+                if _UI:
+                    _UI.note("recovering year-by-year")
+                rows, _ = fetch_cube_by_year(geo_id, level, spec, failures, group)
+            else:
+                log.info("      %s %s: origin unreachable (%s); using fallback",
+                         geo_id, group, res.status)
+                rows = []
+                failures.append({"geo_id": geo_id, "measure_group": group,
+                                 "year": "ALL", "status": "server_error",
+                                 "http": probe.http, "detail": probe.detail})
+        else:
+            rows = []  # genuine 200-empty -> no data at this geo
+    _RAW_CACHE[key] = rows
+    return rows
+
+
+def fetch_group_with_fallback(geo_id, group, spec, failures, by_year=False):
+    """Walk self -> state -> nation; return (rows, source_id, source_level,
+    is_fallback). rows is [] only if nothing in the chain has data."""
+    for src in fallback_chain(geo_id):
+        rows = cached_fetch(src, group, spec, failures, by_year=by_year)
+        if rows:
+            return rows, src, detect_geo_level(src), (src != geo_id)
+    return [], None, None, False
+
+
+# --- derived profile builders (return rows of dicts) -----------------------
+
+def _years(rows):
+    by = defaultdict(list)
     for r in rows:
-        category = (" | ".join(str(r.get(f, "")) for f in cat_fields)
-                    if cat_fields else "")
-        for m in spec["measures"]:
-            if m in r:
-                out.append({
-                    "geo_id": geo_id, "geo_name": geo_name,
-                    "geo_level": geo_level, "year": r.get("Year", ""),
-                    "measure_group": group, "category": category,
-                    "measure": m, "value": r.get(m),
-                })
+        by[str(r.get("Year", ""))].append(r)
+    return by
+
+
+def _num(r, key):
+    v = r.get(key)
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def build_population_diversity(rows):
+    """From the race cube: total population + diversity (Hispanic lumped)."""
+    out = []
+    race_id = {}
+    for r in rows:
+        race_id.setdefault(r.get("Race"), int(r.get("Race ID", 99) or 99))
+    for y, rs in _years(rows).items():
+        total = sum(_num(r, "Hispanic Population") for r in rs)
+        if total <= 0:
+            continue
+        out.append((y, "population", "Total Population", total, None))
+        hisp = sum(_num(r, "Hispanic Population")
+                   for r in rs if r.get("Ethnicity") == HISPANIC)
+        out.append((y, "diversity", "Hispanic (Any Race)",
+                    hisp, 100.0 * hisp / total))
+        byrace = defaultdict(float)
+        for r in rs:
+            if r.get("Ethnicity") == NOT_HISPANIC:
+                byrace[r.get("Race")] += _num(r, "Hispanic Population")
+        for race in sorted(byrace, key=lambda x: race_id.get(x, 99)):
+            cnt = byrace[race]
+            out.append((y, "diversity", f"{race} (Non-Hispanic)",
+                        cnt, 100.0 * cnt / total))
     return out
 
 
-# --- per-geography orchestration -------------------------------------------
-
-def fetch_all(geo_id, geo_name="", by_year=False, resume=False,
-              master_path=None, failures=None) -> dict:
-    """Fetch all three cubes for one geography. Never raises for data/server
-    problems; returns a per-cube summary dict for the run report."""
-    if failures is None:
-        failures = []
-    geo_level = detect_geo_level(geo_id)
-    label = geo_name or geo_id
-    safe = (geo_name or geo_id).replace(",", "").replace(" ", "_")
-    os.makedirs(OUT_DIR, exist_ok=True)
-
-    log.info("\n%s", "=" * 64)
-    log.info("  DataUSA Fetch - %s", label)
-    log.info("  Geo ID: %s   Level: %s   Mode: %s", geo_id, geo_level,
-             "year-by-year" if by_year else "all-years")
-    log.info("%s", "=" * 64)
-
-    availability = check_availability(geo_id, geo_level)
-    combined_long = []
-    summary = {}
-
-    for key, spec in CUBES.items():
-        raw_path = os.path.join(OUT_DIR, f"{safe}__{key}.csv")
-
-        # --- resume: reuse an already-saved per-cube CSV ---
-        if resume and os.path.exists(raw_path):
-            cached = load_rows(raw_path)
-            if cached:
-                log.info("\n  [resume] %s: reusing %d saved row(s) -> %s",
-                         spec["label"], len(cached), raw_path)
-                combined_long.extend(
-                    to_long_records(cached, geo_id, label, geo_level, key, spec))
-                summary[key] = ("resumed", len(cached))
-                continue
-
-        # --- skip ONLY on genuine no-data, never on a server error ---
-        if availability.get(key) == "no_data":
-            log.info("\n  Skipping %s (API returned no data for this geo).",
-                     spec["label"])
-            summary[key] = ("no_data", 0)
+def build_income(rows):
+    """Household-income brackets as counts and % of households (all bins kept)."""
+    out = []
+    for y, rs in _years(rows).items():
+        total = sum(_num(r, "Household Income") for r in rs)
+        if total <= 0:
             continue
-
-        log.info("\n  Fetching %s ...", spec["label"])
-        rows = []
-        status = "ok"
-
-        if by_year:
-            rows, all_err = fetch_cube_by_year(
-                geo_id, geo_level, spec, failures, key)
-            if all_err:
-                status = "server_error"
-        else:
-            res = fetch_cube_all_years(geo_id, geo_level, spec)
-            if res.has_data:
-                rows = res.rows
-            elif res.status == "empty":
-                # 200 with zero rows on the all-years pull => genuinely no data
-                status = "no_data"
-            else:
-                # server_error (or client_error): fall back to year-by-year,
-                # which gives each year its own retry budget and is far more
-                # likely to slip through a brief origin up-window.
-                log.info("      all-years pull failed (%s); falling back to "
-                         "year-by-year ...", res.status)
-                rows, all_err = fetch_cube_by_year(
-                    geo_id, geo_level, spec, failures, key)
-                if not rows and all_err:
-                    status = "server_error"
-                elif not rows:
-                    status = "no_data"
-
-        if rows:
-            save_rows(rows, raw_path)
-            log.info("      saved %d row(s) -> %s", len(rows), raw_path)
-            combined_long.extend(
-                to_long_records(rows, geo_id, label, geo_level, key, spec))
-            summary[key] = ("ok", len(rows))
-        elif status == "server_error":
-            log.error("      SERVER ERROR: could not retrieve %s for %s "
-                      "(origin unreachable). NOT marking as no-data.",
-                      spec["label"], label)
-            failures.append({"geo_id": geo_id, "measure_group": key,
-                             "year": "ALL", "status": "server_error",
-                             "http": "", "detail": "all retries exhausted"})
-            summary[key] = ("server_error", 0)
-        else:
-            log.info("      no data for %s", spec["label"])
-            summary[key] = ("no_data", 0)
-
-    # combined per-geo long file (crash-safe, written now)
-    if combined_long:
-        cpath = os.path.join(OUT_DIR, f"{safe}__combined.csv")
-        save_rows(combined_long, cpath, fieldnames=LONG_FIELDS)
-        log.info("\n  Combined file -> %s (%d rows)", cpath, len(combined_long))
-        if master_path:
-            append_master(combined_long, master_path)
-    else:
-        log.info("\n  No data retrieved for this geography.")
-
-    # availability snapshot (now tri-state and honest)
-    save_rows(
-        [{"geo_id": geo_id, "geo_name": label, "geo_level": geo_level,
-          "measure_group": k, "status": v} for k, v in availability.items()],
-        os.path.join(OUT_DIR, f"{safe}__availability.csv"),
-    )
-    return summary
+        for r in sorted(rs, key=lambda r: int(r.get("Household Income Bucket ID", 0) or 0)):
+            cnt = _num(r, "Household Income")
+            out.append((y, "income", r.get("Household Income Bucket"),
+                        cnt, 100.0 * cnt / total))
+    return out
 
 
-# --- batch driver ----------------------------------------------------------
+def build_coverage(rows):
+    """Coverage members + Private/Public/Uninsured groups, as % of universe."""
+    out = []
+    for y, rs in _years(rows).items():
+        member = defaultdict(float)
+        for r in rs:                       # sum across Age Group
+            member[r.get("Health Coverage")] += _num(r, "Number Covered")
+        total = sum(member.values())
+        if total <= 0:
+            continue
+        for m in COVERAGE_ORDER:
+            if m in member:
+                out.append((y, "insurance", f"{m} ({COVERAGE_GROUP.get(m, '?')})",
+                            member[m], 100.0 * member[m] / total))
+        grp = defaultdict(float)
+        for m, c in member.items():
+            grp[COVERAGE_GROUP.get(m, "Other")] += c
+        for g in GROUP_ORDER:
+            if g in grp:
+                out.append((y, "insurance", f"GROUP: {g}",
+                            grp[g], 100.0 * grp[g] / total))
+    return out
 
-# Canonical verification set: one geography at every level the API supports.
-EXAMPLES = {
-    "United States":      "01000US",
-    "Colorado":           "04000US08",
-    "West Virginia":      "04000US54",
-    "Boulder County, CO": "05000US08013",
-    "Boulder city, CO":   "16000US0807850",
-}
 
-# 50 states + DC + PR, as (name, FIPS). geo_id is "04000US" + FIPS. Lets you
-# run the whole country at State level with one flag (--all-states).
+# group key -> (source cube key, builder). population+diversity both come from race.
+PROFILE_BUILDERS = [
+    ("race", build_population_diversity),
+    ("income", build_income),
+    ("insurance", build_coverage),
+]
+
+
+# --- geo display names -----------------------------------------------------
+
 STATE_FIPS = {
     "Alabama": "01", "Alaska": "02", "Arizona": "04", "Arkansas": "05",
     "California": "06", "Colorado": "08", "Connecticut": "09", "Delaware": "10",
@@ -569,14 +592,191 @@ STATE_FIPS = {
     "West Virginia": "54", "Wisconsin": "55", "Wyoming": "56",
     "Puerto Rico": "72",
 }
+FIPS_NAME = {v: k for k, v in STATE_FIPS.items()}
+
+
+def geo_display(geo_id):
+    if geo_id == "01000US":
+        return "United States"
+    if geo_id.startswith("04000US"):
+        return FIPS_NAME.get(geo_id[len("04000US"):], geo_id)
+    return geo_id
 
 
 def all_states():
     return [("04000US" + fips, name) for name, fips in STATE_FIPS.items()]
 
 
-def parse_geos_file(path) -> list:
-    """File of 'geo_id,Display Name' lines (# comments / blanks ignored)."""
+# --- IO --------------------------------------------------------------------
+
+def save_rows(rows, path, fieldnames=None):
+    if not rows:
+        return
+    if fieldnames is None:
+        fieldnames = sorted({k for row in rows for k in row.keys()})
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+        w.writeheader()
+        w.writerows(rows)
+
+
+def append_master(rows, path, fieldnames):
+    if not rows:
+        return
+    new = not os.path.exists(path)
+    with open(path, "a", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+        if new:
+            w.writeheader()
+        w.writerows(rows)
+
+
+def to_long_records(rows, geo_id, geo_name, geo_level, group, spec):
+    out = []
+    cat_fields = spec["extra_dd"]
+    for r in rows:
+        category = (" | ".join(str(r.get(f, "")) for f in cat_fields)
+                    if cat_fields else "")
+        for m in spec["measures"]:
+            if m in r:
+                out.append({
+                    "geo_id": geo_id, "geo_name": geo_name,
+                    "geo_level": geo_level, "year": r.get("Year", ""),
+                    "measure_group": group, "category": category,
+                    "measure": m, "value": r.get(m)})
+    return out
+
+
+# --- per-geography orchestration -------------------------------------------
+
+def fetch_all(geo_id, geo_name="", by_year=False, resume=False,
+              master_long=None, master_profile=None, failures=None) -> dict:
+    """Build the full profile for one geography (with fallback). Never raises."""
+    if failures is None:
+        failures = []
+    geo_level = detect_geo_level(geo_id)
+    label = geo_name or geo_display(geo_id)
+    safe = label.replace(",", "").replace(" ", "_")
+    os.makedirs(OUT_DIR, exist_ok=True)
+
+    profile_path = os.path.join(OUT_DIR, f"{safe}__profile.csv")
+    if resume and os.path.exists(profile_path):
+        log.info("  [resume] %s: profile already exists, skipping", label)
+        if _UI:
+            _UI.milestone(f"{label}: already done (resume)")
+            for _ in range(3):
+                _UI.advance()
+        return {"_resumed": True}
+
+    log.info("\n%s", "=" * 64)
+    log.info("  DataUSA Profile - %s", label)
+    log.info("  Geo ID: %s   Level: %s   Mode: %s", geo_id, geo_level,
+             "year-by-year" if by_year else "all-years")
+    log.info("%s", "=" * 64)
+
+    profile_rows = []
+    long_rows = []
+    sources = []
+    summary = {}
+
+    for cube_key, builder in PROFILE_BUILDERS:
+        spec = CUBES[cube_key]
+        log.info("\n  %s ...", spec["label"])
+        if _UI:
+            _UI.set_step(spec["label"])
+        rows, src, src_level, is_fb = fetch_group_with_fallback(
+            geo_id, cube_key, spec, failures, by_year=by_year)
+
+        if not rows:
+            log.warning("      no data for %s anywhere in fallback chain", cube_key)
+            if _UI:
+                _UI.milestone(f"{cube_key}: no data anywhere (skipped)")
+                _UI.advance()
+            for g in _groups_from_cube(cube_key):
+                summary[g] = ("none", 0)
+            sources.append({"geo_id": geo_id, "geo_name": label,
+                            "measure_group": cube_key, "source_geo_id": "",
+                            "source_geo_level": "", "is_fallback": "",
+                            "status": "no_data_anywhere"})
+            continue
+
+        src_name = label if src == geo_id else geo_display(src)
+        if is_fb:
+            log.info("      FILLED from %s (%s) [fallback]", src_name, src_level)
+            if _UI:
+                _UI.milestone(f"{cube_key}: filled from {src_name} ({src_level}) "
+                              f"[fallback]")
+        else:
+            log.info("      using this geography's own data")
+            if _UI:
+                _UI.milestone(f"{cube_key}: {len(rows)} rows (own data)")
+        if _UI:
+            _UI.advance()
+
+        # raw per-cube CSV only when the geography has its OWN data (honest raw)
+        if not is_fb:
+            save_rows(rows, os.path.join(OUT_DIR, f"{safe}__{cube_key}.csv"))
+            long_rows.extend(
+                to_long_records(rows, geo_id, label, geo_level, cube_key, spec))
+
+        # derived percentage rows
+        derived = builder(rows)
+        for (yr, mg, cat, cnt, pct) in derived:
+            profile_rows.append({
+                "geo_id": geo_id, "geo_name": label, "geo_level": geo_level,
+                "year": yr, "measure_group": mg, "category": cat,
+                "count": round(cnt, 2),
+                "percent": "" if pct is None else round(pct, 4),
+                "source_geo_id": src, "source_geo_name": src_name,
+                "source_geo_level": src_level, "is_fallback": is_fb})
+        for g in _groups_from_cube(cube_key):
+            n = sum(1 for d in derived if d[1] == g)
+            summary[g] = ("fallback:" + src_level if is_fb else "self", n)
+        sources.append({"geo_id": geo_id, "geo_name": label,
+                        "measure_group": cube_key, "source_geo_id": src,
+                        "source_geo_level": src_level,
+                        "is_fallback": is_fb, "status": "ok"})
+
+    # write outputs (crash-safe, per geo)
+    if profile_rows:
+        save_rows(profile_rows, profile_path, fieldnames=PROFILE_FIELDS)
+        log.info("\n  Profile -> %s (%d rows)", profile_path, len(profile_rows))
+        if _UI:
+            _UI.milestone(f"saved {os.path.basename(profile_path)} "
+                          f"({len(profile_rows)} rows)")
+        if master_profile:
+            append_master(profile_rows, master_profile, PROFILE_FIELDS)
+    else:
+        log.warning("\n  No profile produced for %s", label)
+        if _UI:
+            _UI.milestone(f"{label}: no profile produced")
+    if long_rows:
+        save_rows(long_rows, os.path.join(OUT_DIR, f"{safe}__combined.csv"),
+                  fieldnames=LONG_FIELDS)
+        if master_long:
+            append_master(long_rows, master_long, LONG_FIELDS)
+    save_rows(sources, os.path.join(OUT_DIR, f"{safe}__sources.csv"),
+              fieldnames=["geo_id", "geo_name", "measure_group", "source_geo_id",
+                          "source_geo_level", "is_fallback", "status"])
+    return summary
+
+
+def _groups_from_cube(cube_key):
+    return ["population", "diversity"] if cube_key == "race" else [cube_key]
+
+
+# --- batch driver ----------------------------------------------------------
+
+EXAMPLES = {
+    "United States":      "01000US",
+    "Colorado":           "04000US08",
+    "West Virginia":      "04000US54",
+    "Boulder County, CO": "05000US08013",
+    "Boulder city, CO":   "16000US0807850",
+}
+
+
+def parse_geos_file(path):
     out = []
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
@@ -589,84 +789,103 @@ def parse_geos_file(path) -> list:
 
 
 def setup_logging():
+    """All detail (including retry noise) goes to run.log. The console shows
+    only the friendly progress bar / milestones via the UI object."""
     os.makedirs(OUT_DIR, exist_ok=True)
-    log.setLevel(logging.INFO)
+    log.setLevel(logging.DEBUG)
     log.handlers.clear()
-    ch = logging.StreamHandler()
-    ch.setFormatter(logging.Formatter("%(message)s"))
-    log.addHandler(ch)
     fh = logging.FileHandler(os.path.join(OUT_DIR, "run.log"), encoding="utf-8")
     fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    fh.setLevel(logging.DEBUG)
     log.addHandler(fh)
 
 
 def run_batch(geos, by_year=False, resume=False):
+    global _UI
     setup_logging()
-    master_path = os.path.join(OUT_DIR, "MASTER_all_geographies.csv")
-    if not resume and os.path.exists(master_path):
-        os.remove(master_path)   # fresh master unless resuming
+    master_long = os.path.join(OUT_DIR, "MASTER_all_geographies.csv")
+    master_profile = os.path.join(OUT_DIR, "MASTER_profiles.csv")
+    if not resume:
+        for p in (master_long, master_profile):
+            if os.path.exists(p):
+                os.remove(p)
     failures = []
     overall = {}
-    for geo_id, name in geos:
+    _UI = UI(total_units=len(geos) * 3)
+    print(f"Fetching DataUSA profiles for {len(geos)} geograph"
+          f"{'y' if len(geos) == 1 else 'ies'} "
+          f"(detailed log -> {os.path.join(OUT_DIR, 'run.log')})")
+    for i, (geo_id, name) in enumerate(geos, 1):
+        _UI.start_geo(i, len(geos), name or geo_display(geo_id))
         try:
-            summary = fetch_all(geo_id, name, by_year=by_year, resume=resume,
-                                master_path=master_path, failures=failures)
-            overall[name or geo_id] = summary
+            overall[name or geo_display(geo_id)] = fetch_all(
+                geo_id, name, by_year=by_year, resume=resume,
+                master_long=master_long, master_profile=master_profile,
+                failures=failures)
         except Exception as e:
-            # A truly unexpected error in one geography must never kill the run.
             log.exception("  FATAL while processing %s (%s): %s",
                           name or geo_id, geo_id, e)
+            _UI.milestone(f"ERROR: {name or geo_id} failed ({type(e).__name__})")
             failures.append({"geo_id": geo_id, "measure_group": "ALL",
                              "year": "ALL", "status": "exception",
                              "http": "", "detail": str(e)})
-        time.sleep(0.5)
+        time.sleep(0.3)
+    _UI.close()
+    _UI = None
 
     if failures:
-        fpath = os.path.join(OUT_DIR, "_failures.csv")
-        save_rows(failures, fpath,
+        save_rows(failures, os.path.join(OUT_DIR, "_failures.csv"),
                   fieldnames=["geo_id", "measure_group", "year",
                               "status", "http", "detail"])
-        log.warning("\n  %d failure record(s) logged -> %s",
-                    len(failures), fpath)
-
-    _print_report(overall, master_path)
+        log.warning("%d failure record(s) logged -> _failures.csv", len(failures))
+    _print_report(overall, master_profile, len(failures))
     return overall
 
 
-def _print_report(overall, master_path):
-    log.info("\n%s", "=" * 64)
-    log.info("  RUN SUMMARY (rows per measure group)")
-    log.info("%s", "=" * 64)
-    hdr = f"  {'Geography':<22}{'income':>14}{'insurance':>14}{'race':>10}"
-    log.info(hdr)
-    for geo, summary in overall.items():
+def _print_report(overall, master_profile, n_failures=0):
+    line = "=" * 78
+    out = ["", line,
+           "  RUN SUMMARY  (category rows per measure group; data source in parens)",
+           line]
+    cols = ("population", "diversity", "insurance", "income")
+    abbr = {"self": "self", "none": "none",
+            "fallback:Nation": "fb:Nat", "fallback:State": "fb:St"}
+    out.append("  %-22s%14s%14s%14s%14s" % ("Geography", *cols))
+    for geo, summ in overall.items():
+        if summ.get("_resumed"):
+            out.append("  %-22s%s" % (geo[:22], "  (resumed)"))
+            continue
         cells = []
-        for key in ("income", "insurance", "race"):
-            st, n = summary.get(key, ("-", 0))
-            cells.append(f"{n} ({st})" if st != "-" else "-")
-        log.info("  %-22s%14s%14s%10s", geo[:22], cells[0], cells[1], cells[2])
-    if os.path.exists(master_path):
-        total = max(0, sum(1 for _ in open(master_path, encoding="utf-8")) - 1)
-        log.info("\n  MASTER -> %s (%d data rows)", master_path, total)
-    log.info("%s\n", "=" * 64)
+        for k in cols:
+            st, n = summ.get(k, ("-", 0))
+            cells.append(f"{n} {abbr.get(st, st)}" if st != "-" else "-")
+        out.append("  %-22s%14s%14s%14s%14s" % (geo[:22], *cells))
+    if os.path.exists(master_profile):
+        total = max(0, sum(1 for _ in open(master_profile, encoding="utf-8")) - 1)
+        out.append("")
+        out.append(f"  MASTER_profiles.csv -> {total} rows   "
+                   f"(per-geo files + run.log in {OUT_DIR}/)")
+    if n_failures:
+        out.append(f"  {n_failures} request failure(s) logged -> "
+                   f"{OUT_DIR}/_failures.csv (server errors, retried/fell back)")
+    out.append(line)
+    print("\n".join(out))
 
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser(
-        description="Fetch DataUSA demographics for U.S. geographies.")
-    p.add_argument("--geo", help="Geo ID, or comma-separated list "
-                                 "(e.g. 04000US08,04000US54)")
+        description="Fetch DataUSA demographic profiles for U.S. geographies.")
+    p.add_argument("--geo", help="Geo ID or comma-separated list")
     p.add_argument("--name", default="", help="Display name (single geo only)")
     p.add_argument("--examples", action="store_true",
                    help="Run the canonical Nation/State/County/Place set")
     p.add_argument("--all-states", action="store_true",
                    help="Run all 50 states + DC + PR at State level")
-    p.add_argument("--geos-file",
-                   help="File of 'geo_id,Display Name' lines for batch runs")
+    p.add_argument("--geos-file", help="File of 'geo_id,Display Name' lines")
     p.add_argument("--by-year", action="store_true",
                    help="Pull one year per request (slower, more resilient)")
     p.add_argument("--resume", action="store_true",
-                   help="Reuse already-saved per-cube CSVs instead of refetching")
+                   help="Skip geographies whose profile CSV already exists")
     args = p.parse_args()
 
     if args.examples:
@@ -677,11 +896,8 @@ if __name__ == "__main__":
         geos = parse_geos_file(args.geos_file)
     elif args.geo:
         ids = [g.strip() for g in args.geo.split(",") if g.strip()]
-        if len(ids) == 1:
-            geos = [(ids[0], args.name)]
-        else:
-            geos = [(gid, "") for gid in ids]
+        geos = [(ids[0], args.name)] if len(ids) == 1 else [(g, "") for g in ids]
     else:
-        geos = [("04000US08", "Colorado")]
+        geos = [("01000US", "United States")]
 
     run_batch(geos, by_year=args.by_year, resume=args.resume)

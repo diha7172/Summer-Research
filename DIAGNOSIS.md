@@ -86,6 +86,35 @@ Net effect: identical schema at Nation / State / County / Place; a flaky origin
 now degrades to "logged server_error, retry later," never to "silently empty"
 or "not available."
 
+## v4 additions (profiles, geographic fallback, friendly progress)
+
+On top of the resilient core, v4 produces the analysis-ready output the
+synthetic-population pipeline needs and adds quality-of-life features:
+
+* **Derived percentage profiles** (`<geo>__profile.csv`, `MASTER_profiles.csv`):
+  * `population` – total population (derived from the race cube; the dedicated
+    `acs_yg_total_population_5` cube returns 200-with-zero-rows here, so it is
+    not used).
+  * `diversity` – race with **Hispanic lumped** into one "Hispanic (Any Race)"
+    group plus each race as "(Non-Hispanic)", as % of population.
+  * `insurance` – every coverage member **and** Private / Public / Uninsured
+    group totals, as % of the covered universe (Employer+Direct Purchase →
+    Private; Medicare+Medicaid+VA+Military → Public; Uninsured).
+  * `income` – **all** household-income brackets kept, as % of households.
+* **Geographic fallback** – when an area is missing a measure group, fill it
+  from its **State**, then the **Nation**, and label the source
+  (`source_geo_id`, `source_geo_level`, `is_fallback`). Distributions fall back;
+  the fill is always labelled, never passed off as the area's own measurement.
+  This is what lets a county/place that the flaky origin can't return still
+  yield a usable, clearly-labelled profile.
+* **Fast-outage gate** – if the all-years pull 5xx's, one quick latest-year
+  probe decides whether to bother with year-by-year recovery (origin reachable)
+  or fall back immediately (origin down). No more grinding through ~40 doomed
+  requests during a full outage.
+* **Friendly console** – a live progress bar with per-geography milestones; all
+  the retry/backoff detail goes to `datausa_output/run.log` instead of spamming
+  the terminal.
+
 ## Operational note
 
 Because the cause is the origin's own uptime, the cure is patience + correct
