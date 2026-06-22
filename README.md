@@ -1,4 +1,34 @@
-# DataUSA demographic profile scraper
+# U.S. demographics: scrapers + searchable web app
+
+This repo has two things:
+
+1. **A searchable web app** — type any city, county, state, or the nation and
+   see its income, diversity, insurance, and population profile. Covers **every
+   ACS geography (~35,000)**. See "Web app" below.
+2. **Command-line scrapers** that produce the underlying CSV profiles for a
+   modeling pipeline (`census_scraper.py`, and the older `datausa_scraper.py`).
+
+---
+
+## Web app (search any place)
+
+Zero install beyond Python. You need a free Census API key
+(https://api.census.gov/data/key_signup.html) in `CENSUS_API_KEY` or
+`census_key.txt`.
+
+```powershell
+py census_bulk.py     # pull every geography (~35k) into webapp/data/  (~90s, one time)
+py serve.py           # opens http://localhost:8000 in your browser
+```
+
+Then just search — `Boulder city, Colorado`, `Cook County`, `Texas`,
+`United States`. Use the arrow keys + Enter. Re-run `py census_bulk.py` to
+refresh to a newer ACS year. The generated `webapp/data/` is gitignored (it's
+large and regenerates from the API).
+
+---
+
+## DataUSA demographic profile scraper
 
 Pulls income, health-insurance coverage, and race/ethnicity from the DataUSA
 Tesseract API for any U.S. geography (Nation / State / County / Place) and turns
