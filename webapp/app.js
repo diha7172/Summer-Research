@@ -123,10 +123,16 @@ function geoPanel(geo,ymap){
   if(!p) return `<div class="geopanel">${head}<p class="note">No data for ${YEAR}.</p></div>`;
   const g=Object.fromEntries(p.insurance.groups);
   const stat=(k,v,c)=>`<div class="stat" style="background:${c}"><div class="v">${v==null?'–':v.toFixed(1)+'%'}</div><div class="k">${k}</div></div>`;
+  const ageCard = (p.age&&p.age.length)
+    ? `<div class="card"><h3>Age</h3>
+         <p class="note">Share of population by age group.</p>
+         ${barRows(p.age,'#6366f1')}</div>` : '';
   return `<div class="geopanel">
     ${head}
     <div class="popline">Population (${YEAR}): <b>${p.pop?p.pop.toLocaleString():'–'}</b>${trendHTML(ymap)}</div>
+    ${kpis(p)}
     <div class="grid">
+      ${ageCard}
       <div class="card"><h3>Diversity</h3>
         <p class="note">Share of population. Hispanic is one group; others are non-Hispanic.</p>
         ${barRows(p.diversity,'var(--div)')}</div>
@@ -142,6 +148,20 @@ function geoPanel(geo,ymap){
         ${stat('Uninsured',g['Uninsured'],'var(--unins)')}</div>
       ${barRows(p.insurance.types,'#64748b',Math.max(...p.insurance.types.map(d=>d[1]),1))}</div>
   </div>`;
+}
+function fmtStat(v,unit){
+  if(unit==='$') return '$'+Number(v).toLocaleString();
+  if(unit==='yrs') return v+' yrs';
+  if(unit==='%') return v+'%';
+  return v;
+}
+function kpis(p){
+  const tiles=[];
+  if(p.sex&&p.sex.length>=2) tiles.push(['Sex (F / M)', p.sex[0][1]+'% / '+p.sex[1][1]+'%']);
+  for(const s of (p.stats||[])) tiles.push([s[0], fmtStat(s[1],s[2])]);
+  if(!tiles.length) return '';
+  return '<div class="keystats">'+tiles.map(([k,v])=>
+    `<div class="kpi"><div class="v">${v}</div><div class="k">${k}</div></div>`).join('')+'</div>';
 }
 function toolbar(){
   let t=`<div class="dtoolbar"><span class="chip"><span class="badge b-${selA.level}">${selA.level==='Place'?'City':selA.level}</span> ${selA.name}</span>`;

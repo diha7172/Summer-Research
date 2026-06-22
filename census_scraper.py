@@ -275,10 +275,41 @@ RACE_NH = [
 ]
 POP_VAR = "B01003_001E"
 
-# call A pulls income + race + population in one request
+# Sex by Age (B01001) - age brackets (male+female vars) and sex totals
+SEX_TOTAL, SEX_MALE, SEX_FEMALE = "B01001_001E", "B01001_002E", "B01001_026E"
+AGE_BUCKETS = {
+    "Under 18": ["B01001_003E", "B01001_004E", "B01001_005E", "B01001_006E",
+                 "B01001_027E", "B01001_028E", "B01001_029E", "B01001_030E"],
+    "18-24": ["B01001_007E", "B01001_008E", "B01001_009E", "B01001_010E",
+              "B01001_031E", "B01001_032E", "B01001_033E", "B01001_034E"],
+    "25-34": ["B01001_011E", "B01001_012E", "B01001_035E", "B01001_036E"],
+    "35-44": ["B01001_013E", "B01001_014E", "B01001_037E", "B01001_038E"],
+    "45-54": ["B01001_015E", "B01001_016E", "B01001_039E", "B01001_040E"],
+    "55-64": ["B01001_017E", "B01001_018E", "B01001_019E",
+              "B01001_041E", "B01001_042E", "B01001_043E"],
+    "65-74": ["B01001_020E", "B01001_021E", "B01001_022E",
+              "B01001_044E", "B01001_045E", "B01001_046E"],
+    "75+": ["B01001_023E", "B01001_024E", "B01001_025E",
+            "B01001_047E", "B01001_048E", "B01001_049E"],
+}
+
+# Scalar / socioeconomic indicators (strong predictors of medication use)
+MEDIAN_AGE = "B01002_001E"
+MEDIAN_HHINC = "B19013_001E"
+POV_TOTAL, POV_BELOW = "B17001_001E", "B17001_002E"          # poverty
+EDU_TOTAL = "B15003_001E"                                    # education (25+)
+EDU_BA_PLUS = ["B15003_022E", "B15003_023E", "B15003_024E", "B15003_025E"]
+DIS_TOTAL = "B18101_001E"                                    # disability
+DIS_WITH = ["B18101_004E", "B18101_007E", "B18101_010E", "B18101_013E",
+            "B18101_016E", "B18101_019E", "B18101_023E", "B18101_026E",
+            "B18101_029E", "B18101_032E", "B18101_035E", "B18101_038E"]
+
+# The single-call detail table pulls income + race + population + the scalar
+# indicators (age/sex come from the B01001 group call, disability from B18101).
 DETAIL_VARS = (["NAME", INCOME_TOTAL] + [v for v, _ in INCOME_BINS]
                + [RACE_TOTAL, HISPANIC_VAR] + [v for v, _ in RACE_NH]
-               + [POP_VAR])
+               + [POP_VAR, MEDIAN_AGE, MEDIAN_HHINC, POV_TOTAL, POV_BELOW,
+                  EDU_TOTAL] + EDU_BA_PLUS)
 
 # Insurance: B27010 leaf variables -> (types, is_private, is_public, is_uninsured)
 INS_TOTAL = "B27010_001E"
@@ -534,6 +565,54 @@ def build_insurance(data, year):
 
 BUILDERS = [build_population_diversity, build_income, build_insurance]
 GROUP_KEYS = ("population", "diversity", "income", "insurance")
+
+
+# --- extra ML features: age, sex, scalar socioeconomic indicators ----------
+
+def build_age(data):
+    """Age distribution as % of population (sum of male+female per bracket)."""
+    total = cval(data, SEX_TOTAL)
+    if not total:
+        return []
+    out = []
+    for bucket, vars_ in AGE_BUCKETS.items():
+        cnt = sum(cval(data, v) or 0.0 for v in vars_)
+        out.append([bucket, round(100.0 * cnt / total, 1)])
+    return out
+
+
+def build_sex(data):
+    """[% female, % male] of population."""
+    total = cval(data, SEX_TOTAL)
+    if not total:
+        return []
+    f = cval(data, SEX_FEMALE) or 0.0
+    m = cval(data, SEX_MALE) or 0.0
+    return [["Female", round(100.0 * f / total, 1)],
+            ["Male", round(100.0 * m / total, 1)]]
+
+
+def build_stats(data):
+    """Scalar indicators: [label, value, unit]. Strong med-use correlates."""
+    out = []
+    ma = cval(data, MEDIAN_AGE)
+    if ma:
+        out.append(["Median age", round(ma, 1), "yrs"])
+    mi = cval(data, MEDIAN_HHINC)
+    if mi:
+        out.append(["Median household income", int(mi), "$"])
+    pt, pb = cval(data, POV_TOTAL), cval(data, POV_BELOW)
+    if pt:
+        out.append(["Below poverty line", round(100.0 * (pb or 0) / pt, 1), "%"])
+    et = cval(data, EDU_TOTAL)
+    if et:
+        ba = sum(cval(data, v) or 0.0 for v in EDU_BA_PLUS)
+        out.append(["Bachelor's degree or higher", round(100.0 * ba / et, 1), "%"])
+    dt = cval(data, DIS_TOTAL)
+    if dt:
+        dw = sum(cval(data, v) or 0.0 for v in DIS_WITH)
+        out.append(["With a disability", round(100.0 * dw / dt, 1), "%"])
+    return out
 
 
 # --- IO --------------------------------------------------------------------

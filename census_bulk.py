@@ -57,19 +57,21 @@ def geo_id_of(level, row):
     return row.get("NAME", "")
 
 
-def merge(detail_rows, ins_rows, level):
-    """Join the detail call and the B27010 call on the geo-id columns."""
+def merge(detail_rows, extra_rowsets, level):
+    """Join the detail call with any number of extra group calls (B27010,
+    B01001, B18101) on the geo-id columns."""
     keycols = {"Nation": [], "State": ["state"],
                "County": ["state", "county"], "Place": ["state", "place"]}[level]
 
     def k(r):
         return tuple(r.get(c_, "") for c_ in keycols)
 
-    ins = {k(r): r for r in ins_rows}
+    maps = [{k(r): r for r in rs} for rs in extra_rowsets]
     out = []
     for d in detail_rows:
         row = dict(d)
-        row.update(ins.get(k(d), {}))
+        for mp in maps:
+            row.update(mp.get(k(d), {}))
         out.append((geo_id_of(level, d), d.get("NAME", ""), row))
     return out
 
@@ -88,10 +90,16 @@ def profile_for(flat, year):
              if not cat.startswith("GROUP")]
     groups = [(cat.replace("GROUP: ", ""), pct) for (_, mg, cat, cnt, pct)
               in ins_rows if cat.startswith("GROUP")]
+    age = c.build_age(flat)
+    sex = c.build_sex(flat)
+    stats = c.build_stats(flat)
     if pop is None and not inc and not div:
         return None
     return {
         "pop": int(pop) if pop else None,
+        "age": age,
+        "sex": sex,
+        "stats": stats,
         "diversity": [[a, round(b, 1)] for a, b in div],
         "income": [[a, round(b, 1)] for a, b in inc],
         "insurance": {"types": [[a, round(b, 1)] for a, b in types],
@@ -115,9 +123,11 @@ def latest_year(key):
 def pull_level(level, geo_params, year, key):
     """Return list of (geo_id, name, level, profile)."""
     detail = fetch_rows(year, ",".join(c.DETAIL_VARS), geo_params, key)
-    ins = fetch_rows(year, "group(B27010)", geo_params, key)
+    ins = fetch_rows(year, "group(B27010)", geo_params, key)     # insurance
+    agesex = fetch_rows(year, "group(B01001)", geo_params, key)  # age + sex
+    disab = fetch_rows(year, "group(B18101)", geo_params, key)   # disability
     out = []
-    for gid, name, flat in merge(detail, ins, level):
+    for gid, name, flat in merge(detail, [ins, agesex, disab], level):
         prof = profile_for(flat, year)
         if prof:
             out.append((gid, name, level, prof))
