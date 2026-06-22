@@ -6,3 +6,5 @@ datausa_output/
 *.log
 # Census API key must never be committed
 census_key.txt
+# generated web-app data (regenerate with: py census_bulk.py)
+webapp/data/
