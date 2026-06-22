@@ -8,3 +8,5 @@ datausa_output/
 census_key.txt
 # generated web-app data (regenerate with: py census_bulk.py)
 webapp/data/
+# generated single-file app (regenerate with: py build_standalone.py)
+Demographics_Explorer.html

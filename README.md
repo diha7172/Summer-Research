@@ -26,6 +26,21 @@ Then just search — `Boulder city, Colorado`, `Cook County`, `Texas`,
 refresh to a newer ACS year. The generated `webapp/data/` is gitignored (it's
 large and regenerates from the API).
 
+### Single-file version to share (no setup for the recipient)
+
+To hand someone a copy they can just **double-click** — no Python, no server,
+no API key, works offline:
+
+```powershell
+py census_bulk.py          # if you haven't already
+py build_standalone.py     # -> Demographics_Explorer.html  (~4.5 MB, all 35k geographies embedded)
+```
+
+`Demographics_Explorer.html` is one self-contained file (data is gzip+base64
+embedded and decompressed in the browser). Email it / drop it on a shared
+drive; the recipient opens it in any modern browser (Chrome/Edge/Firefox/
+Safari). Great for a quick demo / review.
+
 ---
 
 ## DataUSA demographic profile scraper
