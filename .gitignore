@@ -4,3 +4,5 @@ datausa_output/
 # scraper output directories (datausa_output and any custom OUT_DIR used in tests)
 *_output/
 *.log
+# Census API key must never be committed
+census_key.txt

@@ -443,33 +443,37 @@ def cached_fetch(geo_id, group, spec, failures, by_year=False):
     if by_year:
         rows, _ = fetch_cube_by_year(geo_id, level, spec, failures, group)
     else:
-        res = fetch_cube_all_years(geo_id, level, spec)
-        if res.has_data:
-            rows = res.rows
-        elif res.is_server_error or res.status == "client_error":
-            # Fast-outage gate: one quick latest-year probe. If the origin
-            # can't even answer that, it's down for this geo -> skip the
-            # expensive year-by-year grind and let the fallback chain take
-            # over immediately (keeps batch runs snappy during an outage).
+        # Probe first: a cheap latest-year request decides quickly whether the
+        # origin can serve this geo at all. If it can't (origin down / cache
+        # miss against a sick origin), fall back in seconds instead of grinding
+        # through the full retry budget on the big all-years query.
+        if _UI:
+            _UI.note("checking origin")
+        probe = request_with_retry(
+            _params(level, geo_id, spec, latest=True), max_retries=3)
+        if probe.status == "empty":
+            rows = []  # 200-with-zero-rows -> genuinely no data at this geo
+        elif not probe.ok:
+            log.info("      %s %s: origin unreachable (%s); using fallback",
+                     geo_id, group, probe.status)
+            rows = []
+            failures.append({"geo_id": geo_id, "measure_group": group,
+                             "year": "ALL", "status": "server_error",
+                             "http": probe.http, "detail": probe.detail})
+        else:
+            # origin answered -> pull every year (recover year-by-year if the
+            # bigger all-years query trips a transient error)
             if _UI:
-                _UI.note("checking if origin is reachable")
-            probe = request_with_retry(
-                _params(level, geo_id, spec, latest=True), max_retries=2)
-            if probe.has_data or probe.status == "empty":
-                log.info("      %s %s: origin reachable, year-by-year recovery",
-                         geo_id, group)
+                _UI.note("fetching all years")
+            res = fetch_cube_all_years(geo_id, level, spec)
+            if res.has_data:
+                rows = res.rows
+            elif res.status == "empty":
+                rows = []
+            else:
                 if _UI:
                     _UI.note("recovering year-by-year")
                 rows, _ = fetch_cube_by_year(geo_id, level, spec, failures, group)
-            else:
-                log.info("      %s %s: origin unreachable (%s); using fallback",
-                         geo_id, group, res.status)
-                rows = []
-                failures.append({"geo_id": geo_id, "measure_group": group,
-                                 "year": "ALL", "status": "server_error",
-                                 "http": probe.http, "detail": probe.detail})
-        else:
-            rows = []  # genuine 200-empty -> no data at this geo
     _RAW_CACHE[key] = rows
     return rows
 
