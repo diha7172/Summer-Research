@@ -29,6 +29,9 @@ import census_scraper as c
 
 DATA_DIR = os.path.join("webapp", "data")
 PROF_DIR = os.path.join(DATA_DIR, "profiles")
+# Snapshot years for the year selector / trends. Spans a decade but stays small
+# enough to embed in the single-file build. Override with --years.
+DEFAULT_BULK_YEARS = [2013, 2018, 2024]
 
 
 def fetch_rows(year, get, geo_params, key):
@@ -118,9 +121,24 @@ def pull_level(level, geo_params, year, key):
     return out
 
 
+def parse_years(spec):
+    if not spec:
+        return DEFAULT_BULK_YEARS
+    years = set()
+    for part in spec.split(","):
+        part = part.strip()
+        if "-" in part:
+            a, b = part.split("-", 1)
+            years.update(range(int(a), int(b) + 1))
+        elif part:
+            years.add(int(part))
+    return sorted(years)
+
+
 def main():
     ap = argparse.ArgumentParser(description="Bulk-pull all Census geographies.")
-    ap.add_argument("--year", type=int, help="ACS5 year (default: latest)")
+    ap.add_argument("--years", help="e.g. 2013,2018,2024 or 2013-2024 "
+                                    "(default: 2013,2018,2024)")
     ap.add_argument("--no-places", action="store_true",
                     help="skip ~30k places (states+counties only, much faster)")
     args = ap.parse_args()
@@ -131,40 +149,43 @@ def main():
         return
 
     os.makedirs(PROF_DIR, exist_ok=True)
-    year = args.year or latest_year(key)
-    print(f"Census bulk pull - ACS 5-year {year}")
+    years = parse_years(args.years)
+    latest = max(years)
+    print(f"Census bulk pull - ACS 5-year {years}")
 
-    index = []
-    shards = {}      # shard name -> {geo_id: profile}
+    index_map = {}          # geo_id -> index entry (from the latest year)
+    # shard name -> {geo_id: {year_str: profile}}
+    shards = {}
 
-    def add(records):
+    def add(records, year, is_latest):
         for gid, name, level, prof in records:
-            index.append({"id": gid, "name": name, "level": level,
-                          "state": gid.split("US", 1)[1][:2]
-                          if level in ("County", "Place", "State") else ""})
-            shards.setdefault(shard_of(level, gid), {})[gid] = prof
+            shards.setdefault(shard_of(level, gid), {}) \
+                  .setdefault(gid, {})[str(year)] = prof
+            if is_latest:
+                index_map[gid] = {
+                    "id": gid, "name": name, "level": level,
+                    "state": gid.split("US", 1)[1][:2]
+                    if level in ("County", "Place", "State") else ""}
 
     t0 = time.time()
-    print("  nation ...", flush=True)
-    add(pull_level("Nation", {"for": "us:1"}, year, key))
-    print("  states ...", flush=True)
-    add(pull_level("State", {"for": "state:*"}, year, key))
-    print("  counties ...", flush=True)
-    add(pull_level("County", {"for": "county:*"}, year, key))
+    fipses = sorted(c.STATE_FIPS.values())
+    for year in years:
+        is_latest = (year == latest)
+        print(f"\n  year {year}:", flush=True)
+        print("    nation/states/counties ...", flush=True)
+        add(pull_level("Nation", {"for": "us:1"}, year, key), year, is_latest)
+        add(pull_level("State", {"for": "state:*"}, year, key), year, is_latest)
+        add(pull_level("County", {"for": "county:*"}, year, key), year, is_latest)
+        if not args.no_places:
+            for i, ss in enumerate(fipses, 1):
+                recs = pull_level("Place", {"for": "place:*",
+                                            "in": f"state:{ss}"}, year, key)
+                add(recs, year, is_latest)
+                print(f"\r    places {i}/{len(fipses)} (state {ss})        ",
+                      end="", flush=True)
+            print()
 
-    if not args.no_places:
-        fipses = sorted(c.STATE_FIPS.values())
-        for i, ss in enumerate(fipses, 1):
-            recs = pull_level("Place", {"for": "place:*", "in": f"state:{ss}"},
-                              year, key)
-            add(recs)
-            print(f"\r  places {i}/{len(fipses)} (state {ss}): "
-                  f"+{len(recs)}   total geos {len(index)}     ",
-                  end="", flush=True)
-        print()
-
-    # write outputs
-    index.sort(key=lambda r: (r["name"] or "").lower())
+    index = sorted(index_map.values(), key=lambda r: (r["name"] or "").lower())
     with open(os.path.join(DATA_DIR, "index.json"), "w", encoding="utf-8") as f:
         json.dump(index, f, ensure_ascii=False, separators=(",", ":"))
     for shard, profiles in shards.items():
@@ -175,14 +196,14 @@ def main():
     for r in index:
         counts[r["level"]] = counts.get(r["level"], 0) + 1
     with open(os.path.join(DATA_DIR, "meta.json"), "w", encoding="utf-8") as f:
-        json.dump({"year": year, "counts": counts,
+        json.dump({"year": latest, "years": years, "counts": counts,
                    "total": len(index),
                    "generated": time.strftime("%Y-%m-%d %H:%M")}, f)
 
     size = sum(os.path.getsize(os.path.join(PROF_DIR, x))
                for x in os.listdir(PROF_DIR)) / 1e6
     print(f"\nDone in {time.time()-t0:.0f}s")
-    print(f"  geographies: {len(index):,}  {counts}")
+    print(f"  geographies: {len(index):,}  years: {years}  {counts}")
     print(f"  data: webapp/data/  ({size:.1f} MB profiles + index)")
     print("  start the app:  py serve.py")
 
