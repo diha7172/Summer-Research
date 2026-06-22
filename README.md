@@ -3,7 +3,9 @@
 This repo has two things:
 
 1. **A searchable web app** — type any city, county, state, or the nation and
-   see its income, diversity, insurance, and population profile. Covers **every
+   see its population, age structure, sex, income, diversity, health insurance,
+   and key socioeconomic indicators (median age, median household income,
+   poverty rate, education, disability rate) profile. Covers **every
    ACS geography (~35,000)**. See "Web app" below.
 2. **Command-line scrapers** that produce the underlying CSV profiles for a
    modeling pipeline (`census_scraper.py`, and the older `datausa_scraper.py`).

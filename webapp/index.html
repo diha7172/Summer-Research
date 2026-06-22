@@ -49,8 +49,11 @@
   .popline b{color:var(--ink);font-size:19px}
   .trend{font-size:12.5px;font-weight:700;margin-left:6px}
   .up{color:#16a34a}.down{color:#dc2626}.flat{color:#64748b}
-  .grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
-  @media(max-width:680px){.grid{grid-template-columns:1fr}}
+  .keystats{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:16px}
+  .kpi{background:#fff;border-radius:12px;padding:10px 14px;box-shadow:var(--shadow);min-width:118px}
+  .kpi .v{font-size:18px;font-weight:800;color:#0f172a}
+  .kpi .k{font-size:11px;color:var(--muted);margin-top:2px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px}
   .card{background:var(--panel);border-radius:14px;padding:16px 16px 18px;box-shadow:var(--shadow);margin-bottom:16px}
   .card h3{margin:0 0 2px;font-size:14px}
   .card .note{color:var(--muted);font-size:12px;margin:0 0 12px}
