@@ -127,9 +127,13 @@ function geoPanel(geo,ymap){
     ? `<div class="card"><h3>Age</h3>
          <p class="note">Share of population by age group.</p>
          ${barRows(p.age,'#6366f1')}</div>` : '';
+  const fbnote = p.fb
+    ? `<div class="fbnote">⚠ This area's own ACS data wasn't available for ${YEAR}; showing <b>${p.fb}</b>.</div>`
+    : '';
   return `<div class="geopanel">
     ${head}
     <div class="popline">Population (${YEAR}): <b>${p.pop?p.pop.toLocaleString():'–'}</b>${trendHTML(ymap)}</div>
+    ${fbnote}
     ${kpis(p)}
     <div class="grid">
       ${ageCard}
