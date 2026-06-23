@@ -120,6 +120,40 @@ def latest_year(key):
     raise SystemExit("Could not reach the Census API for any year.")
 
 
+def apply_failsafe(index, shards, years):
+    """Failsafe: any geography missing its own data for a year is filled from
+    its STATE (then the NATION), clearly tagged so it's never passed off as the
+    area's own measurement. The percentage distributions come from the state;
+    population is blanked (we don't know the area's own count). Returns the
+    number of geo-year slots filled."""
+    filled = 0
+    us = shards.get("us", {})
+    nat = us.get("01000US", {})
+    ys = [str(y) for y in years]
+    for r in index:
+        gid, lvl = r["id"], r["level"]
+        if lvl in ("Nation", "State"):
+            continue
+        ymap = shards.setdefault(shard_of(lvl, gid), {}).setdefault(gid, {})
+        st = us.get("04000US" + r["state"], {})
+        st_name = c.FIPS_NAME.get(r["state"], "state")
+        for y in ys:
+            if y in ymap:
+                continue
+            if y in st:
+                src, label = st[y], f"{st_name} (state-level estimate)"
+            elif y in nat:
+                src, label = nat[y], "United States (national estimate)"
+            else:
+                continue
+            prof = dict(src)
+            prof["pop"] = None          # area's own population is unknown
+            prof["fb"] = label
+            ymap[y] = prof
+            filled += 1
+    return filled
+
+
 def pull_level(level, geo_params, year, key):
     """Return list of (geo_id, name, level, profile)."""
     detail = fetch_rows(year, ",".join(c.DETAIL_VARS), geo_params, key)
@@ -199,6 +233,9 @@ def main():
             print()
 
     index = sorted(index_map.values(), key=lambda r: (r["name"] or "").lower())
+    filled = apply_failsafe(index, shards, years)
+    print(f"  failsafe: filled {filled:,} missing geo-year slots from "
+          f"state/nation")
     with open(os.path.join(DATA_DIR, "index.json"), "w", encoding="utf-8") as f:
         json.dump(index, f, ensure_ascii=False, separators=(",", ":"))
     for shard, profiles in shards.items():
