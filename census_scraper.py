@@ -498,6 +498,18 @@ def cval(data, key):
 
 # --- derived profile builders (per geo-year) -------------------------------
 
+# Diversity grouping: keep these non-Hispanic races separate; fold the four
+# smallest (American Indian/Alaska Native, Native Hawaiian/Pacific Islander,
+# Some Other Race, Two or More Races) into a single "Other / Multiracial" group.
+DIVERSITY_MAIN = [
+    ("B03002_003E", "White Alone (Non-Hispanic)"),
+    ("B03002_004E", "Black or African American Alone (Non-Hispanic)"),
+    ("B03002_006E", "Asian Alone (Non-Hispanic)"),
+]
+DIVERSITY_OTHER = ["B03002_005E", "B03002_007E", "B03002_008E", "B03002_009E"]
+DIVERSITY_OTHER_LABEL = "Other / Multiracial (Non-Hispanic)"
+
+
 def build_population_diversity(data, year):
     out = []
     total = cval(data, RACE_TOTAL)
@@ -508,10 +520,12 @@ def build_population_diversity(data, year):
     hisp = cval(data, HISPANIC_VAR) or 0.0
     out.append((year, "diversity", "Hispanic (Any Race)",
                 hisp, 100.0 * hisp / total))
-    for var, name in RACE_NH:
+    for var, name in DIVERSITY_MAIN:
         cnt = cval(data, var) or 0.0
-        out.append((year, "diversity", f"{name} (Non-Hispanic)",
-                    cnt, 100.0 * cnt / total))
+        out.append((year, "diversity", name, cnt, 100.0 * cnt / total))
+    other = sum(cval(data, v) or 0.0 for v in DIVERSITY_OTHER)
+    out.append((year, "diversity", DIVERSITY_OTHER_LABEL,
+                other, 100.0 * other / total))
     return out
 
 

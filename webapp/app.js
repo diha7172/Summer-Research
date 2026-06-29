@@ -47,8 +47,10 @@ async function boot(){
     $('#controls').classList.remove('hidden');
     const c=META.counts||{};
     $('#subtitle').innerHTML=
-      `Census ACS 5-year &middot; ${(META.total||INDEX.length).toLocaleString()} geographies `
-      +`(${(c.Place||0).toLocaleString()} cities, ${(c.County||0).toLocaleString()} counties, ${c.State||0} states) `
+      `Census ACS 5-year &middot; ${(META.total||INDEX.length).toLocaleString()} U.S. geographies &middot; `
+      +`50 states + DC + Puerto Rico &middot; `
+      +`${(c.County||0).toLocaleString()} counties &amp; equivalents &middot; `
+      +`${(c.Place||0).toLocaleString()} cities, towns &amp; CDPs `
       +`&middot; years ${(META.years||[META.year]).join(', ')}`;
     $('#q').focus();
   }catch(e){
