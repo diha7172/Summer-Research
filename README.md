@@ -38,7 +38,7 @@ no API key, works offline:
 
 ```powershell
 py census_bulk.py          # if you haven't already
-py build_standalone.py     # -> Demographics_Explorer.html  (~12 MB, all 35k geographies x 3 years embedded)
+py build_standalone.py     # -> Demographics_Explorer.html  (~18 MB, all 35k geographies x 3 years embedded)
 ```
 
 `Demographics_Explorer.html` is one self-contained file (data is gzip+base64
