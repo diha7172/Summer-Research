@@ -38,13 +38,58 @@ no API key, works offline:
 
 ```powershell
 py census_bulk.py          # if you haven't already
-py build_standalone.py     # -> Demographics_Explorer.html  (~12 MB, all 35k geographies x 3 years embedded)
+py build_standalone.py     # -> Demographics_Explorer.html  (~18 MB, all 35k geographies x 3 years embedded)
 ```
 
 `Demographics_Explorer.html` is one self-contained file (data is gzip+base64
 embedded and decompressed in the browser). Email it / drop it on a shared
 drive; the recipient opens it in any modern browser (Chrome/Edge/Firefox/
 Safari). Great for a quick demo / review.
+
+### What the web app shows (data dictionary)
+
+**Source:** U.S. Census Bureau, American Community Survey (ACS) **5-year**
+estimates, pulled directly from `api.census.gov`. Three snapshot years:
+**2013, 2018, 2024** (switchable in the app).
+
+**Geographic coverage (35,093 areas):**
+
+| Level | Count | What it is |
+|---|---|---|
+| Nation | 1 | the whole United States |
+| State | 52 | **50 states + District of Columbia + Puerto Rico** (DC & PR are *not* states) |
+| County | 3,222 | **counties & county-equivalents** (incl. Louisiana parishes, Alaska boroughs, independent cities, PR municipios) |
+| Place | 31,818 | **cities, towns & Census Designated Places (CDPs)** — the Census term is "places"; CDPs are named unincorporated communities |
+
+**Measures shown for each place / year** (all percentages are of that place's
+own population or households, so they're comparable across geographies):
+
+| Measure | Meaning | ACS table |
+|---|---|---|
+| **Population** | total residents | B01003 |
+| **Age** | share in each of 8 brackets (Under 18 … 75+) | B01001 |
+| **Sex** | % female / % male — **self-reported binary sex as the Census collects it**, not gender identity | B01001 |
+| **Diversity** | 5 groups: **Hispanic** (any race) + non-Hispanic **White**, **Black**, **Asian**, and **Other / Multiracial** | B03002 |
+| **Household income** | share of households in each of 16 brackets (`< $10,000` … `$200,000+`) | B19001 |
+| **Health insurance** | **Private**, **Public**, **Uninsured** + the 6 coverage types | B27010 |
+| **Median age** | median age in years | B01002 |
+| **Median household income** | median in dollars | B19013 |
+| **Below poverty line** | % of people below the federal poverty level | B17001 |
+| **Bachelor's degree or higher** | % of adults 25+ with a 4-year degree or more | B15003 |
+| **With a disability** | % of people with one or more disabilities | B18101 |
+
+Notes:
+
+* **"Other / Multiracial"** combines four small non-Hispanic groups — American
+  Indian & Alaska Native, Native Hawaiian & Pacific Islander, Some Other Race,
+  and Two or More Races. Income, diversity, and age each sum to ~100%.
+* **Insurance** — `Uninsured` is an exclusive share, but `Private` and `Public`
+  **overlap** (a person can have both, e.g. employer + Medicare), so those and
+  the per-type bars need not sum to 100%.
+* **State-level failsafe** — a small place with no ACS data for a given year
+  shows its **state's** figures instead (then the nation as a last resort),
+  clearly labelled in the app, with population blanked. So no searchable place
+  ever comes up empty.
 
 ---
 
