@@ -138,6 +138,7 @@ function geoPanel(geo,ymap){
     ${fbnote}
     ${kpis(p)}
     <div class="grid">
+      ${mapCard(geo)}
       ${ageCard}
       <div class="card"><h3>Diversity</h3>
         <p class="note">Share of population. Hispanic is one group; others are non-Hispanic.</p>
@@ -168,6 +169,24 @@ function kpis(p){
   if(!tiles.length) return '';
   return '<div class="keystats">'+tiles.map(([k,v])=>
     `<div class="kpi"><div class="v">${v}</div><div class="k">${k}</div></div>`).join('')+'</div>';
+}
+function mapCard(geo){
+  const gmaps=`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(geo.name)}`;
+  const link=`<a href="${gmaps}" target="_blank" rel="noopener">Open in Google Maps &#8599;</a>`;
+  if(geo.lat==null || geo.lon==null || !navigator.onLine){
+    const why = !navigator.onLine ? 'Map needs an internet connection.' : 'No map location for this area.';
+    return `<div class="card"><h3>Location</h3><p class="note">${why} ${link}</p></div>`;
+  }
+  let bbox;
+  if(geo.level==='Nation'){ bbox='-125,24,-66,50'; }
+  else{
+    const d={State:3.5,County:0.5,Place:0.1}[geo.level]||1;
+    bbox=[geo.lon-d, geo.lat-d*0.75, geo.lon+d, geo.lat+d*0.75].join(',');
+  }
+  const src=`https://www.openstreetmap.org/export/embed.html?bbox=${bbox}&layer=mapnik&marker=${geo.lat},${geo.lon}`;
+  return `<div class="card"><h3>Location</h3>
+    <div class="mapwrap"><iframe loading="lazy" src="${src}" title="Map of ${geo.name}"></iframe></div>
+    <p class="note">${geo.name} &middot; ${link}</p></div>`;
 }
 function toolbar(){
   let t=`<div class="dtoolbar"><span class="chip"><span class="badge b-${selA.level}">${selA.level==='Place'?'City':selA.level}</span> ${selA.name}</span>`;
