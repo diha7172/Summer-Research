@@ -136,9 +136,9 @@ function geoPanel(geo,ymap){
     ${head}
     <div class="popline">Population (${YEAR}): <b>${p.pop?p.pop.toLocaleString():'–'}</b>${trendHTML(ymap)}</div>
     ${fbnote}
+    ${mapCard(geo)}
     ${kpis(p)}
     <div class="grid">
-      ${mapCard(geo)}
       ${ageCard}
       <div class="card"><h3>Diversity</h3>
         <p class="note">Share of population. Hispanic is one group; others are non-Hispanic.</p>
