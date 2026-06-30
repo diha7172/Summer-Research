@@ -25,10 +25,49 @@ Output:
 
 import os
 import sys
+import csv
+import io
 import json
 import time
+import zipfile
 import argparse
+import urllib.request
 import census_scraper as c
+
+GAZETTEER = ("https://www2.census.gov/geo/docs/maps-data/data/gazetteer/"
+             "2024_Gazetteer/2024_Gaz_{}_national.zip")
+
+
+def attach_coords(index):
+    """Add centroid lat/lon to each geography from the Census Gazetteer, so the
+    web app can show a map. Best-effort: if it can't download, maps just don't
+    show for that level. Keyed by GEOID -> our geo-id prefix."""
+    files = {"state": "04000US", "counties": "05000US", "place": "16000US"}
+    coords = {"01000US": [39.8283, -98.5795]}   # geographic center of CONUS
+    for kind, prefix in files.items():
+        try:
+            blob = urllib.request.urlopen(GAZETTEER.format(kind), timeout=120).read()
+            z = zipfile.ZipFile(io.BytesIO(blob))
+            txt = [n for n in z.namelist() if n.lower().endswith(".txt")][0]
+            rows = z.read(txt).decode("latin-1").splitlines()
+            rdr = csv.DictReader(rows, delimiter="\t")
+            f = {k.strip(): k for k in rdr.fieldnames}
+            for row in rdr:
+                try:
+                    coords[prefix + row[f["GEOID"]].strip()] = [
+                        round(float(row[f["INTPTLAT"]].strip()), 4),
+                        round(float(row[f["INTPTLONG"]].strip()), 4)]
+                except (ValueError, KeyError, TypeError):
+                    continue
+        except Exception as e:
+            print(f"  coords: could not fetch {kind} gazetteer ({e})")
+    hit = 0
+    for r in index:
+        c_ = coords.get(r["id"])
+        if c_:
+            r["lat"], r["lon"] = c_[0], c_[1]
+            hit += 1
+    print(f"  coords: attached to {hit}/{len(index)} geographies")
 
 DATA_DIR = os.path.join("webapp", "data")
 PROF_DIR = os.path.join(DATA_DIR, "profiles")
@@ -236,6 +275,7 @@ def main():
     filled = apply_failsafe(index, shards, years)
     print(f"  failsafe: filled {filled:,} missing geo-year slots from "
           f"state/nation")
+    attach_coords(index)
     with open(os.path.join(DATA_DIR, "index.json"), "w", encoding="utf-8") as f:
         json.dump(index, f, ensure_ascii=False, separators=(",", ":"))
     for shard, profiles in shards.items():
