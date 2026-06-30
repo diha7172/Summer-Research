@@ -44,7 +44,8 @@ async function boot(){
     ysel.innerHTML=(META.years||[META.year]).slice().sort((a,b)=>b-a)
       .map(y=>`<option ${String(y)===YEAR?'selected':''}>${y}</option>`).join('');
     ysel.onchange=()=>{YEAR=ysel.value;renderAll();};
-    $('#controls').classList.remove('hidden');
+    $('#controls').classList.add('show');
+    document.querySelectorAll('.exchip').forEach(b=>b.onclick=()=>quickPick(b.dataset.q));
     const c=META.counts||{};
     $('#subtitle').innerHTML=
       `Census ACS 5-year &middot; ${(META.total||INDEX.length).toLocaleString()} U.S. geographies &middot; `
@@ -94,7 +95,9 @@ async function choose(r){
   else { selA=r; profA=await loadProfile(r); selB=null; profB=null; }
   renderAll();
   $('#q').blur();
+  window.scrollTo({top:0,behavior:'smooth'});
 }
+function quickPick(q){ search(q); if(CUR.length) choose(CUR[0]); }
 
 /* ---- rendering ---- */
 function barRows(items,color,maxOverride){
@@ -103,7 +106,7 @@ function barRows(items,color,maxOverride){
   return items.map(([lab,pct])=>{
     const w=Math.max(1,pct/max*100);
     return `<div class="bar"><span class="lab" title="${lab}">${lab}</span>
-      <span class="track"><span class="fill" style="width:${w}%;background:${color}"></span></span>
+      <span class="track"><span class="fill" style="--w:${w}%;background:${color}"></span></span>
       <span class="pct">${pct.toFixed(1)}%</span></div>`;
   }).join('');
 }
